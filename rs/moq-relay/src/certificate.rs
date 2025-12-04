@@ -1,6 +1,6 @@
 use futures::FutureExt;
 use moq_native::{ServerReloader, ServerTlsConfig};
-use notify::{EventKind, RecursiveMode};
+use notify::{Config, EventKind, RecursiveMode};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 use std::sync::Arc;
 
@@ -10,6 +10,7 @@ where
 {
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify_debouncer_full::new_debouncer(Duration::from_secs(5), None, tx)?;
+    watcher.configure(Config::default().with_follow_symlinks(true))?;
 
     println!("Starting listening");
     println!("{:?}", paths);
