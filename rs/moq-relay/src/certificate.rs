@@ -2,6 +2,7 @@ use futures::FutureExt;
 use moq_native::{ServerReloader, ServerTlsConfig};
 use notify::{EventKind, RecursiveMode};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
+use std::sync::Arc;
 
 async fn watch_files_debounced<F>(paths: Vec<PathBuf>, mut on_reload: F) -> notify::Result<()>
 where
@@ -10,15 +11,21 @@ where
     let (tx, rx) = mpsc::channel();
     let mut watcher = notify_debouncer_full::new_debouncer(Duration::from_secs(5), None, tx)?;
 
+    println!("Starting listening");
+    println!("{:?}", paths);
+
     for path in paths {
         watcher.watch(path, RecursiveMode::NonRecursive)?;
     }
 
     // Blocking loop listening for events
+    println!("Listening");
     for event_result in rx {
         match event_result {
             Ok(events) => {
+                println!("Receive event");
                 for event in events {
+                    println!("{:?}", event.kind);
                     // Only handle modify or create
                     if matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
                         on_reload().await;
@@ -43,14 +50,17 @@ pub(crate) fn watch_server_certificates(reloader: ServerReloader, tls_config: Se
 
     let paths: Vec<PathBuf> = tls_config.cert.iter().chain(&tls_config.key).cloned().collect();
 
+    let reloader = Arc::new(reloader);
+    let tls_config = Arc::new(tls_config);
+
     tokio::spawn(async move {
         let result = watch_files_debounced(paths, move || {
-            let tls_config = tls_config.clone();
             let reloader = reloader.clone();
+            let tls_config = tls_config.clone();
 
             async move {
                 tracing::info!("reloading server certificate");
-                if let Err(err) = reloader.reload(&tls_config) {
+                if let Err(err) = reloader.reload(tls_config.as_ref()) {
                     tracing::warn!(%err, "failed to reload server certificate");
                 }
             }
@@ -71,6 +81,10 @@ pub(crate) fn watch_web_certificate(
 ) {
     let paths = vec![cert.clone(), key.clone()];
 
+    let config = Arc::new(config);
+    let cert = Arc::new(cert);
+    let key = Arc::new(key);
+
     tokio::spawn(async move {
         let result = watch_files_debounced(paths, move || {
             let config = config.clone();
@@ -80,7 +94,7 @@ pub(crate) fn watch_web_certificate(
             async move {
                 tracing::info!("reloading web certificate");
 
-                if let Err(err) = config.reload_from_pem_file(cert, key).await {
+                if let Err(err) = config.reload_from_pem_file(cert.as_ref(), key.as_ref()).await {
                     tracing::warn!(%err, "failed to reload web certificate");
                 }
             }
