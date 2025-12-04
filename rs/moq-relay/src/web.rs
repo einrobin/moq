@@ -27,6 +27,7 @@ use std::future::Future;
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{Auth, Cluster};
+use crate::certificate::watch_web_certificate;
 
 #[derive(Debug, Deserialize)]
 struct Params {
@@ -118,10 +119,12 @@ impl Web {
 		};
 
 		let https = if let Some(listen) = self.config.https.listen {
-			let cert = self.config.https.cert.as_ref().expect("missing certificate");
-			let key = self.config.https.key.as_ref().expect("missing key");
+			let cert = self.config.https.cert.expect("missing certificate");
+			let key = self.config.https.key.expect("missing key");
 
-			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
+
+			watch_web_certificate(config.clone(), cert, key);
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))

@@ -3,6 +3,7 @@ mod cluster;
 mod config;
 mod connection;
 mod web;
+mod certificate;
 
 pub use auth::*;
 pub use cluster::*;
@@ -15,10 +16,17 @@ async fn main() -> anyhow::Result<()> {
 	let config = Config::load()?;
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
+	let tls_config = config.server.tls.clone();
 	let mut server = config.server.init()?;
 	let client = config.client.init()?;
 	let auth = config.auth.init()?;
 	let fingerprints = server.fingerprints().to_vec();
+
+	if !tls_config.cert.is_empty() {
+		let reloader = server.reloader();
+
+		certificate::watch_server_certificates(reloader, tls_config);
+	}
 
 	let cluster = Cluster::new(config.cluster, client);
 	let cloned = cluster.clone();
