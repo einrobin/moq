@@ -1,9 +1,9 @@
 mod auth;
+mod certificate;
 mod cluster;
 mod config;
 mod connection;
 mod web;
-mod certificate;
 
 pub use auth::*;
 pub use cluster::*;

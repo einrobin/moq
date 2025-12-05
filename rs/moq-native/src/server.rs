@@ -88,10 +88,7 @@ impl ServerReloader {
 	pub fn reload(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
 		let mut certs = Vec::new();
 
-		anyhow::ensure!(
-			config.cert.len() == config.key.len(),
-			"must provide both cert and key"
-		);
+		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
 
 		for (cert, key) in config.cert.iter().zip(config.key.iter()) {
 			certs.push(Arc::new(self.certs.load(cert, key)?));
@@ -179,7 +176,7 @@ impl Server {
 			quic: quic.clone(),
 			accept: Default::default(),
 			fingerprints,
-			certs: serve
+			certs: serve,
 		})
 	}
 
@@ -376,7 +373,9 @@ impl ServeCerts {
 
 		let certified_key = CertifiedKey::new(chain, key);
 
-		certified_key.keys_match().context("private key doesn't match certificate")?;
+		certified_key
+			.keys_match()
+			.context("private key doesn't match certificate")?;
 
 		Ok(certified_key)
 	}
@@ -415,7 +414,9 @@ impl ServeCerts {
 
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn fingerprints(&self) -> Vec<String> {
-		self.certs.read().unwrap()
+		self.certs
+			.read()
+			.unwrap()
 			.iter()
 			.map(|ck| {
 				let fingerprint = crate::crypto::sha256(&self.provider, ck.cert[0].as_ref());

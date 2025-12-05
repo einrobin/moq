@@ -26,8 +26,8 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Auth, Cluster};
 use crate::certificate::watch_web_certificate;
+use crate::{Auth, Cluster};
 
 #[derive(Debug, Deserialize)]
 struct Params {
