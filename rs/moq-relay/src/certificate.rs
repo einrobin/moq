@@ -32,6 +32,8 @@ where
 						EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
 					) {
 						on_reload().await;
+						// Only handle one event, we update everything as soon as one file updates
+						break
 					}
 				}
 			}
