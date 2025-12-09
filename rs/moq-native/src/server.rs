@@ -8,6 +8,7 @@ use rustls::server::{ClientHello, ResolvesServerCert};
 use rustls::sign::CertifiedKey;
 use std::fs;
 use std::io::{self, Cursor, Read};
+use std::sync::RwLock;
 use url::Url;
 use web_transport_quinn::{http, ServerError};
 
@@ -78,10 +79,36 @@ impl ServerConfig {
 	}
 }
 
+#[derive(Clone)]
+pub struct ServerReloader {
+	certs: Arc<ServeCerts>,
+}
+
+impl ServerReloader {
+	pub fn reload(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
+		let mut certs = Vec::new();
+
+		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
+
+		for (cert, key) in config.cert.iter().zip(config.key.iter()) {
+			certs.push(Arc::new(self.certs.load(cert, key)?));
+		}
+
+		if !config.generate.is_empty() {
+			certs.push(Arc::new(self.certs.generate(&config.generate)?));
+		}
+
+		self.certs.set(certs);
+
+		Ok(())
+	}
+}
+
 pub struct Server {
 	quic: quinn::Endpoint,
 	accept: FuturesUnordered<BoxFuture<'static, anyhow::Result<Request>>>,
 	fingerprints: Vec<String>,
+	certs: Arc<ServeCerts>,
 }
 
 impl Server {
@@ -97,7 +124,7 @@ impl Server {
 
 		let provider = crypto::provider();
 
-		let mut serve = ServeCerts::new(provider.clone());
+		let certs = ServeCerts::new(provider.clone());
 
 		// Load the certificate and key files based on their index.
 		anyhow::ensure!(
@@ -106,19 +133,22 @@ impl Server {
 		);
 
 		for (cert, key) in config.tls.cert.iter().zip(config.tls.key.iter()) {
-			serve.load(cert, key)?;
+			let cert = certs.load(cert, key)?;
+			certs.add(Arc::new(cert));
 		}
 
 		if !config.tls.generate.is_empty() {
-			serve.generate(&config.tls.generate)?;
+			let cert = certs.generate(&config.tls.generate)?;
+			certs.add(Arc::new(cert));
 		}
 
-		let fingerprints = serve.fingerprints();
+		let fingerprints = certs.fingerprints();
+		let certs = Arc::new(certs);
 
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])?
 			.with_no_client_auth()
-			.with_cert_resolver(Arc::new(serve));
+			.with_cert_resolver(certs.clone());
 
 		tls.alpn_protocols = vec![
 			web_transport_quinn::ALPN.as_bytes().to_vec(),
@@ -146,7 +176,14 @@ impl Server {
 			quic: quic.clone(),
 			accept: Default::default(),
 			fingerprints,
+			certs,
 		})
+	}
+
+	pub fn reloader(&self) -> ServerReloader {
+		ServerReloader {
+			certs: self.certs.clone(),
+		}
 	}
 
 	pub fn fingerprints(&self) -> &[String] {
@@ -301,20 +338,20 @@ impl QuicRequest {
 
 #[derive(Debug)]
 struct ServeCerts {
-	certs: Vec<Arc<CertifiedKey>>,
+	certs: RwLock<Vec<Arc<CertifiedKey>>>,
 	provider: crypto::Provider,
 }
 
 impl ServeCerts {
 	pub fn new(provider: crypto::Provider) -> Self {
 		Self {
-			certs: Vec::new(),
+			certs: RwLock::new(Vec::new()),
 			provider,
 		}
 	}
 
-	// Load a certificate and corresponding key from a file
-	pub fn load(&mut self, chain: &PathBuf, key: &PathBuf) -> anyhow::Result<()> {
+	// Load a certificate and corresponding key from a file, but don't add it to the certs
+	pub fn load(&self, chain: &PathBuf, key: &PathBuf) -> anyhow::Result<CertifiedKey> {
 		let chain = fs::File::open(chain).context("failed to open cert file")?;
 		let mut chain = io::BufReader::new(chain);
 
@@ -334,12 +371,16 @@ impl ServeCerts {
 		let key = rustls_pemfile::private_key(&mut Cursor::new(&buf))?.context("missing private key")?;
 		let key = self.provider.key_provider.load_private_key(key)?;
 
-		self.certs.push(Arc::new(CertifiedKey::new(chain, key)));
+		let certified_key = CertifiedKey::new(chain, key);
 
-		Ok(())
+		certified_key
+			.keys_match()
+			.context("private key doesn't match certificate")?;
+
+		Ok(certified_key)
 	}
 
-	pub fn generate(&mut self, hostnames: &[String]) -> anyhow::Result<()> {
+	pub fn generate(&self, hostnames: &[String]) -> anyhow::Result<CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
 		let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -358,14 +399,24 @@ impl ServeCerts {
 		let key = self.provider.key_provider.load_private_key(key_der.into())?;
 
 		// Create a rustls::sign::CertifiedKey
-		self.certs.push(Arc::new(CertifiedKey::new(vec![cert.into()], key)));
+		Ok(CertifiedKey::new(vec![cert.into()], key))
+	}
 
-		Ok(())
+	// Replace the certificates
+	pub fn set(&self, certs: Vec<Arc<CertifiedKey>>) {
+		*self.certs.write().unwrap() = certs;
+	}
+
+	// Add a certificate
+	pub fn add(&self, cert: Arc<CertifiedKey>) {
+		self.certs.write().unwrap().push(cert);
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.
 	pub fn fingerprints(&self) -> Vec<String> {
 		self.certs
+			.read()
+			.unwrap()
 			.iter()
 			.map(|ck| {
 				let fingerprint = crate::crypto::sha256(&self.provider, ck.cert[0].as_ref());
@@ -379,7 +430,7 @@ impl ServeCerts {
 		let server_name = client_hello.server_name()?;
 		let dns_name = rustls::pki_types::ServerName::try_from(server_name).ok()?;
 
-		for ck in &self.certs {
+		for ck in self.certs.read().unwrap().iter() {
 			let leaf: webpki::EndEntityCert = ck
 				.end_entity_cert()
 				.expect("missing certificate")
@@ -405,6 +456,6 @@ impl ResolvesServerCert for ServeCerts {
 		// We do our best and return the first certificate.
 		tracing::warn!(server_name = ?client_hello.server_name(), "no SNI certificate found");
 
-		self.certs.first().cloned()
+		self.certs.read().unwrap().first().cloned()
 	}
 }

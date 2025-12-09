@@ -1,4 +1,4 @@
-use futures::{SinkExt, StreamExt};
+use futures::{FutureExt, SinkExt, StreamExt};
 use std::{
 	net,
 	path::PathBuf,
@@ -26,7 +26,7 @@ use serde::{Deserialize, Serialize};
 use std::future::Future;
 use tower_http::cors::{Any, CorsLayer};
 
-use crate::{Auth, Cluster};
+use crate::{Auth, Cluster, ConfigReloader};
 
 #[derive(Debug, Deserialize)]
 struct Params {
@@ -83,11 +83,16 @@ pub struct WebState {
 pub struct Web {
 	state: WebState,
 	config: WebConfig,
+	reloader: Arc<ConfigReloader>,
 }
 
 impl Web {
-	pub fn new(state: WebState, config: WebConfig) -> Self {
-		Self { state, config }
+	pub fn new(state: WebState, config: WebConfig, reloader: Arc<ConfigReloader>) -> Self {
+		Self {
+			state,
+			config,
+			reloader,
+		}
 	}
 
 	pub async fn run(self) -> anyhow::Result<()> {
@@ -118,10 +123,23 @@ impl Web {
 		};
 
 		let https = if let Some(listen) = self.config.https.listen {
-			let cert = self.config.https.cert.as_ref().expect("missing certificate");
-			let key = self.config.https.key.as_ref().expect("missing key");
+			let cert = self.config.https.cert.clone().expect("missing https.cert");
+			let key = self.config.https.key.clone().expect("missing https.key");
+			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
-			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert, key).await?;
+			let config_clone = config.clone();
+			self.reloader.watch_changes(move || {
+				let config_clone = config_clone.clone();
+				let cert = cert.clone();
+				let key = key.clone();
+
+				async move {
+					if let Err(err) = config_clone.reload_from_pem_file(cert, key).await {
+						tracing::warn!(%err, "failed to reload web certificate");
+					}
+				}
+				.boxed()
+			});
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))
