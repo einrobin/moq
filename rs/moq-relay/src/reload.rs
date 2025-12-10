@@ -1,13 +1,13 @@
 use notify::{Config, EventKind, PollWatcher, RecursiveMode, Watcher};
-use std::path::{PathBuf, Path};
 use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use tokio::time::Sleep;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
+use tokio::time::Sleep;
 
 pub struct ConfigReloader {
 	paths: Vec<PathBuf>,
@@ -45,6 +45,8 @@ impl ConfigReloader {
 			.with_poll_interval(Duration::from_secs(20))
 			.with_follow_symlinks(true);
 
+		// The polling method appears to be the only method that is actually reliable
+		// and works 100 % with normal files, symlinks, symlinks to symlinks, ...
 		let mut watcher = PollWatcher::new(
 			move |res| {
 				let _ = tx.blocking_send(res);
@@ -73,7 +75,7 @@ impl ConfigReloader {
 						futures::future::pending::<()>().await;
 					}
 				} => {
-					debounce = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));
+					debounce = Some(Box::pin(tokio::time::sleep(Duration::from_secs(2))));
 				},
 				res = rx.recv() => {
 					match res {
@@ -82,7 +84,7 @@ impl ConfigReloader {
 								event.kind,
 								EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
 							) {
-								debounce = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));
+								debounce = Some(Box::pin(tokio::time::sleep(Duration::from_secs(2))));
 							}
 						}
 						Some(Err(err)) => {
@@ -100,6 +102,7 @@ impl ConfigReloader {
 					}
 				} => {
 					debounce = None;
+
 					tracing::info!("reloading configuration");
 					let listeners = {
 						let lock = self.listeners.lock().unwrap();
