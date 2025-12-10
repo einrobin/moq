@@ -1,11 +1,15 @@
-use notify::{Config, EventKind, RecursiveMode};
-use std::path::PathBuf;
+use notify::{Config, EventKind, PollWatcher, RecursiveMode, Watcher};
 use std::collections::HashSet;
+use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
+use tokio::time::Sleep;
+
+const DEBOUNCE_DURATION: Duration = Duration::from_secs(2);
 
 pub struct ConfigReloader {
 	paths: Vec<PathBuf>,
@@ -39,11 +43,18 @@ impl ConfigReloader {
 	pub async fn start_watching(&self) -> anyhow::Result<()> {
 		let (tx, mut rx) = mpsc::channel(1);
 
-		let mut watcher = notify_debouncer_full::new_debouncer(Duration::from_secs(5), None, move |res| {
-			let _ = tx.blocking_send(res);
-		})?;
+		let config = Config::default()
+			.with_poll_interval(Duration::from_secs(20))
+			.with_follow_symlinks(true);
 
-		watcher.configure(Config::default().with_follow_symlinks(false))?;
+		// The polling method appears to be the only method that is actually reliable
+		// and works 100 % with normal files, symlinks, symlinks to symlinks, ...
+		let mut watcher = PollWatcher::new(
+			move |res| {
+				let _ = tx.blocking_send(res);
+			},
+			config,
+		)?;
 
 		for path in &self.paths {
 			watcher.watch(path, RecursiveMode::NonRecursive)?;
@@ -52,8 +63,10 @@ impl ConfigReloader {
 		#[cfg(unix)]
 		let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
+		let mut debounce: Option<Pin<Box<Sleep>>> = None;
+
 		loop {
-			let reload = tokio::select! {
+			tokio::select! {
 				_ = async {
 					#[cfg(unix)]
 					{
@@ -63,38 +76,49 @@ impl ConfigReloader {
 					{
 						futures::future::pending::<()>().await;
 					}
-				} => true,
+				} => {
+					debounce = Some(Box::pin(tokio::time::sleep(DEBOUNCE_DURATION)));
+				},
 				res = rx.recv() => {
 					match res {
-						Some(Ok(events)) => {
-							events.iter().any(|event| matches!(
+						Some(Ok(event)) => {
+							if matches!(
 								event.kind,
 								EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-							))
-						}
-						Some(Err(errors)) => {
-							for err in errors {
-								tracing::warn!(%err, "watcher error");
+							) {
+								debounce = Some(Box::pin(tokio::time::sleep(DEBOUNCE_DURATION)));
 							}
-							false
 						}
-						None => false,
+						Some(Err(err)) => {
+							tracing::warn!(%err, "watcher error");
+						}
+						None => break,
 					}
-				}
-			};
+				},
+				_ = async {
+					if let Some(timer) = debounce.as_mut() {
+						timer.await;
+						true
+					} else {
+						futures::future::pending::<bool>().await
+					}
+				} => {
+					debounce = None;
 
-			if reload {
-				tracing::info!("reloading configuration");
-				let listeners = {
-					let lock = self.listeners.lock().unwrap();
-					lock.clone()
-				};
+					tracing::info!("reloading configuration");
+					let listeners = {
+						let lock = self.listeners.lock().unwrap();
+						lock.clone()
+					};
 
-				for listener in listeners {
-					listener();
+					for listener in listeners {
+						listener();
+					}
 				}
 			}
 		}
+
+		Ok(())
 	}
 }
 

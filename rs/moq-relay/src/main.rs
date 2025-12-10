@@ -12,7 +12,6 @@ pub use connection::*;
 pub use reload::*;
 pub use web::*;
 
-use futures::FutureExt;
 use std::sync::Arc;
 
 #[tokio::main]

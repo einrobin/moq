@@ -1,4 +1,4 @@
-use futures::{FutureExt, SinkExt, StreamExt};
+use futures::{SinkExt, StreamExt};
 use std::{
 	net,
 	path::PathBuf,
