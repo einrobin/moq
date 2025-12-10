@@ -43,7 +43,7 @@ impl ConfigReloader {
 			let _ = tx.blocking_send(res);
 		})?;
 
-		watcher.configure(Config::default().with_follow_symlinks(false))?;
+		watcher.configure(Config::default().with_follow_symlinks(true))?;
 
 		// Watch the parent directory to handle atomic file replacements (e.g. vim)
 		let mut parents = HashSet::new();
