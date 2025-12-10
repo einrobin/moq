@@ -1,8 +1,10 @@
 use notify::{Config, EventKind, PollWatcher, RecursiveMode, Watcher};
 use std::path::{PathBuf, Path};
 use std::collections::HashSet;
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use tokio::time::Sleep;
 #[cfg(unix)]
 use tokio::signal::unix::{signal, SignalKind};
 use tokio::sync::mpsc;
@@ -40,7 +42,7 @@ impl ConfigReloader {
 		let (tx, mut rx) = mpsc::channel(1);
 
 		let config = Config::default()
-			.with_poll_interval(Duration::from_secs(5))
+			.with_poll_interval(Duration::from_secs(20))
 			.with_follow_symlinks(true);
 
 		let mut watcher = PollWatcher::new(
@@ -57,8 +59,10 @@ impl ConfigReloader {
 		#[cfg(unix)]
 		let mut sigusr1 = signal(SignalKind::user_defined1())?;
 
+		let mut debounce: Option<Pin<Box<Sleep>>> = None;
+
 		loop {
-			let reload = tokio::select! {
+			tokio::select! {
 				_ = async {
 					#[cfg(unix)]
 					{
@@ -68,36 +72,48 @@ impl ConfigReloader {
 					{
 						futures::future::pending::<()>().await;
 					}
-				} => true,
+				} => {
+					debounce = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));
+				},
 				res = rx.recv() => {
 					match res {
 						Some(Ok(event)) => {
-							matches!(
+							if matches!(
 								event.kind,
 								EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-							)
+							) {
+								debounce = Some(Box::pin(tokio::time::sleep(Duration::from_secs(10))));
+							}
 						}
 						Some(Err(err)) => {
 							tracing::warn!(%err, "watcher error");
-							false
 						}
-						None => false,
+						None => break,
 					}
-				}
-			};
+				},
+				_ = async {
+					if let Some(timer) = debounce.as_mut() {
+						timer.await;
+						true
+					} else {
+						futures::future::pending::<bool>().await
+					}
+				} => {
+					debounce = None;
+					tracing::info!("reloading configuration");
+					let listeners = {
+						let lock = self.listeners.lock().unwrap();
+						lock.clone()
+					};
 
-			if reload {
-				tracing::info!("reloading configuration");
-				let listeners = {
-					let lock = self.listeners.lock().unwrap();
-					lock.clone()
-				};
-
-				for listener in listeners {
-					listener();
+					for listener in listeners {
+						listener();
+					}
 				}
 			}
 		}
+
+		Ok(())
 	}
 }
 
