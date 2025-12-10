@@ -133,12 +133,11 @@ impl Web {
 				let cert = cert.clone();
 				let key = key.clone();
 
-				async move {
+				tokio::spawn(async move {
 					if let Err(err) = config_clone.reload_from_pem_file(cert, key).await {
 						tracing::warn!(%err, "failed to reload web certificate");
 					}
-				}
-				.boxed()
+				});
 			});
 
 			let server = hyper_serve::bind_rustls(listen, config);
