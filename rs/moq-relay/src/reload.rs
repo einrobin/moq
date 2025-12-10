@@ -1,6 +1,6 @@
-use futures::future::BoxFuture;
 use notify::{Config, EventKind, RecursiveMode};
 use std::path::PathBuf;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 #[cfg(unix)]
@@ -9,7 +9,7 @@ use tokio::sync::mpsc;
 
 pub struct ConfigReloader {
 	paths: Vec<PathBuf>,
-	listeners: Arc<Mutex<Vec<Box<dyn Fn() -> BoxFuture<'static, ()> + Send + Sync>>>>,
+	listeners: Arc<Mutex<Vec<Arc<dyn Fn() + Send + Sync>>>>,
 }
 
 impl ConfigReloader {
@@ -22,9 +22,9 @@ impl ConfigReloader {
 
 	pub fn watch_changes<F>(&self, listener: F)
 	where
-		F: Fn() -> BoxFuture<'static, ()> + Send + Sync + 'static,
+		F: Fn() + Send + Sync + 'static,
 	{
-		self.listeners.lock().unwrap().push(Box::new(listener));
+		self.listeners.lock().unwrap().push(Arc::new(listener));
 	}
 
 	pub fn start_background_task(self: Arc<Self>) {
@@ -87,11 +87,11 @@ impl ConfigReloader {
 				tracing::info!("reloading configuration");
 				let listeners = {
 					let lock = self.listeners.lock().unwrap();
-					lock.iter().map(|l| l()).collect::<Vec<_>>()
+					lock.clone()
 				};
 
-				for future in listeners {
-					future.await;
+				for listener in listeners {
+					listener();
 				}
 			}
 		}
@@ -99,17 +99,17 @@ impl ConfigReloader {
 }
 
 pub fn build_watchable_paths(config: &crate::Config) -> Vec<PathBuf> {
-	let mut paths = Vec::new();
+	let mut paths = HashSet::new();
 
 	paths.extend(config.server.tls.cert.iter().cloned());
 	paths.extend(config.server.tls.key.iter().cloned());
 
 	if let Some(cert) = &config.web.https.cert {
-		paths.push(cert.clone());
+		paths.insert(cert.clone());
 	}
 	if let Some(key) = &config.web.https.key {
-		paths.push(key.clone());
+		paths.insert(key.clone());
 	}
 
-	paths
+	paths.into_iter().collect()
 }

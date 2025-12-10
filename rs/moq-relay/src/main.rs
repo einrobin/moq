@@ -37,12 +37,9 @@ async fn main() -> anyhow::Result<()> {
 		reloader_arc.clone().watch_changes(move || {
 			let server_reloader = server_reloader.clone();
 			let tls_config = tls_config.clone();
-			async move {
-				if let Err(err) = server_reloader.reload(&tls_config) {
-					tracing::warn!(%err, "failed to reload server certificate");
-				}
+			if let Err(err) = server_reloader.reload(&tls_config) {
+				tracing::warn!(%err, "failed to reload server certificate");
 			}
-			.boxed()
 		});
 	}
 
