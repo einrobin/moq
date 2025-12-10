@@ -1,5 +1,5 @@
 use notify::{Config, EventKind, RecursiveMode};
-use std::path::PathBuf;
+use std::path::{PathBuf, Path};
 use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -45,8 +45,20 @@ impl ConfigReloader {
 
 		watcher.configure(Config::default().with_follow_symlinks(false))?;
 
+		// Watch the parent directory to handle atomic file replacements (e.g. vim)
+		let mut parents = HashSet::new();
 		for path in &self.paths {
-			watcher.watch(path, RecursiveMode::NonRecursive)?;
+			let parent = path.parent().unwrap_or(Path::new("."));
+			let parent = if parent.as_os_str().is_empty() {
+				Path::new(".")
+			} else {
+				parent
+			};
+			parents.insert(parent.to_owned());
+		}
+
+		for parent in parents {
+			watcher.watch(&parent, RecursiveMode::NonRecursive)?;
 		}
 
 		#[cfg(unix)]
@@ -67,10 +79,21 @@ impl ConfigReloader {
 				res = rx.recv() => {
 					match res {
 						Some(Ok(events)) => {
-							events.iter().any(|event| matches!(
-								event.kind,
-								EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
-							))
+							events.iter().any(|event| {
+								for path in event.paths.iter() {
+									tracing::info!(?path, ?event.kind, "file change detected");
+								}
+								
+								// Filter out events for files we aren't watching
+								if !event.paths.iter().any(|p| self.paths.iter().any(|w| p.ends_with(w))) {
+									return false;
+								}
+
+								matches!(
+									event.kind,
+									EventKind::Modify(_) | EventKind::Create(_) | EventKind::Remove(_)
+								)
+							})
 						}
 						Some(Err(errors)) => {
 							for err in errors {
