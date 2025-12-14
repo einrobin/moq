@@ -8,6 +8,12 @@ pub struct ConfigReloader {
 	listeners: Arc<Mutex<Vec<Arc<ReloadListener>>>>,
 }
 
+impl Default for ConfigReloader {
+	fn default() -> Self {
+		Self::new()
+	}
+}
+
 impl ConfigReloader {
 	pub fn new() -> Self {
 		Self {
