@@ -18,7 +18,7 @@ use std::sync::Arc;
 async fn main() -> anyhow::Result<()> {
 	let config = Config::load()?;
 
-	let reloader_arc = Arc::new(ConfigReloader::new(build_watchable_paths(&config)));
+	let reloader_arc = Arc::new(ConfigReloader::new());
 
 	let addr = config.server.bind.unwrap_or("[::]:443".parse().unwrap());
 	let tls_config = config.server.tls.clone();
