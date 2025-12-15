@@ -121,7 +121,7 @@ impl Web {
 			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
 			#[cfg(unix)]
-			setup_reload(config.clone(), cert.clone(), key.clone());
+			setup_reload(config.clone(), cert, key);
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))
