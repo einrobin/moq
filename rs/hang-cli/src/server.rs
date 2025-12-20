@@ -6,6 +6,7 @@ use axum::{http::Method, routing::get, Router};
 use hang::moq_lite;
 use std::net::SocketAddr;
 use std::path::PathBuf;
+use std::sync::{Arc, RwLock};
 use tokio::io::AsyncRead;
 use tower_http::cors::{Any, CorsLayer};
 use tower_http::services::ServeDir;
@@ -28,17 +29,6 @@ pub async fn server<T: AsyncRead + Unpin>(
 
 	let server = config.init()?;
 
-	// Get the first certificate's fingerprint.
-	// TODO serve all of them so we can support multiple signature algorithms.
-	// TODO Handle reloading of fingerprints
-	let fingerprint = server
-		.fingerprints()
-		.read()
-		.expect("fingerprints read lock poisened")
-		.first()
-		.context("missing certificate")?
-		.clone();
-
 	let broadcast = moq_lite::Broadcast::produce();
 	let mut import = Import::new(broadcast.producer.into(), format);
 
@@ -47,10 +37,12 @@ pub async fn server<T: AsyncRead + Unpin>(
 	// Notify systemd that we're ready.
 	let _ = sd_notify::notify(true, &[sd_notify::NotifyState::Ready]);
 
+	let fingerprints = server.fingerprints();
+
 	tokio::select! {
 		res = accept(server, name, broadcast.consumer) => res,
 		res = import.read_from(input) => res,
-		res = web(listen, fingerprint, public) => res,
+		res = web(listen, fingerprints, public) => res,
 	}
 }
 
@@ -105,13 +97,24 @@ async fn run_session(
 }
 
 // Initialize the HTTP server (but don't serve yet).
-async fn web(bind: SocketAddr, fingerprint: String, public: Option<PathBuf>) -> anyhow::Result<()> {
+async fn web(bind: SocketAddr, fingerprints: Arc<RwLock<Vec<String>>>, public: Option<PathBuf>) -> anyhow::Result<()> {
 	async fn handle_404() -> impl IntoResponse {
 		(StatusCode::NOT_FOUND, "Not found")
 	}
 
+	let fingerprint_handler = move || async move {
+		// Get the first certificate's fingerprint.
+		// TODO serve all of them so we can support multiple signature algorithms.
+		fingerprints
+			.read()
+			.expect("fingerprints read lock poisoned")
+			.first()
+			.cloned()
+			.ok_or((StatusCode::NOT_FOUND, "missing certificate"))
+	};
+
 	let mut app = Router::new()
-		.route("/certificate.sha256", get(fingerprint))
+		.route("/certificate.sha256", get(fingerprint_handler))
 		.layer(CorsLayer::new().allow_origin(Any).allow_methods([Method::GET]));
 
 	// If a public directory is provided, serve it.
