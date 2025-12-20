@@ -102,9 +102,7 @@ impl Server {
 
 		let certs = ServeCerts::new(provider.clone());
 
-		for cert in certs.load_certs(&config.tls)? {
-			certs.add(cert);
-		}
+		certs.load_certs(&config.tls)?;
 
 		let certs = Arc::new(certs);
 
@@ -119,7 +117,7 @@ impl Server {
 						if signal.recv().await.is_some() {
 							tracing::info!("reloading server certificates");
 
-							if let Err(err) = certs.reload(&tls_config) {
+							if let Err(err) = certs.load_certs(&tls_config) {
 								tracing::warn!(%err, "failed to reload server certificates");
 							}
 						}
@@ -330,13 +328,7 @@ impl ServeCerts {
 		}
 	}
 
-	pub fn reload(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
-		let certs = self.load_certs(config)?;
-		self.set(certs);
-		Ok(())
-	}
-
-	fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<Vec<Arc<CertifiedKey>>> {
+	pub fn load_certs(&self, config: &ServerTlsConfig) -> anyhow::Result<()> {
 		anyhow::ensure!(config.cert.len() == config.key.len(), "must provide both cert and key");
 
 		let mut certs = Vec::new();
@@ -346,15 +338,17 @@ impl ServeCerts {
 			certs.push(Arc::new(self.load(cert, key)?));
 		}
 
+		// Generate a new certificate if requested.
 		if !config.generate.is_empty() {
 			certs.push(Arc::new(self.generate(&config.generate)?));
 		}
 
-		Ok(certs)
+		self.set_certs(certs);
+		Ok(())
 	}
 
 	// Load a certificate and corresponding key from a file, but don't add it to the certs
-	pub fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<CertifiedKey> {
+	fn load(&self, chain_path: &PathBuf, key_path: &PathBuf) -> anyhow::Result<CertifiedKey> {
 		let chain = fs::File::open(chain_path).context("failed to open cert file")?;
 		let mut chain = io::BufReader::new(chain);
 
@@ -385,7 +379,7 @@ impl ServeCerts {
 		Ok(certified_key)
 	}
 
-	pub fn generate(&self, hostnames: &[String]) -> anyhow::Result<CertifiedKey> {
+	fn generate(&self, hostnames: &[String]) -> anyhow::Result<CertifiedKey> {
 		let key_pair = rcgen::KeyPair::generate()?;
 
 		let mut params = rcgen::CertificateParams::new(hostnames)?;
@@ -408,18 +402,8 @@ impl ServeCerts {
 	}
 
 	// Replace the certificates
-	pub fn set(&self, certs: Vec<Arc<CertifiedKey>>) {
-		{
-			*self.certs.write().expect("certs write lock poisened") = certs;
-		}
-		self.update_fingerprints();
-	}
-
-	// Add a certificate
-	pub fn add(&self, cert: Arc<CertifiedKey>) {
-		{
-			self.certs.write().expect("certs write lock poisened").push(cert);
-		}
+	pub fn set_certs(&self, certs: Vec<Arc<CertifiedKey>>) {
+		*self.certs.write().expect("certs write lock poisened") = certs;
 		self.update_fingerprints();
 	}
 
@@ -443,7 +427,7 @@ impl ServeCerts {
 		let server_name = client_hello.server_name()?;
 		let dns_name = rustls::pki_types::ServerName::try_from(server_name).ok()?;
 
-		for ck in self.certs.read().unwrap().iter() {
+		for ck in self.certs.read().expect("certs read lock poisoned").iter() {
 			let leaf: webpki::EndEntityCert = ck
 				.end_entity_cert()
 				.expect("missing certificate")
@@ -469,6 +453,6 @@ impl ResolvesServerCert for ServeCerts {
 		// We do our best and return the first certificate.
 		tracing::warn!(server_name = ?client_hello.server_name(), "no SNI certificate found");
 
-		self.certs.read().unwrap().first().cloned()
+		self.certs.read().expect("certs read lock poisoned").first().cloned()
 	}
 }
