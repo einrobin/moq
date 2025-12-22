@@ -9,8 +9,6 @@ use rustls::sign::CertifiedKey;
 use std::fs;
 use std::io::{self, Cursor, Read};
 use std::sync::{Arc, RwLock};
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
 use url::Url;
 use web_transport_quinn::{http, ServerError};
 
@@ -107,25 +105,7 @@ impl Server {
 		let certs = Arc::new(certs);
 
 		#[cfg(unix)]
-		{
-			let certs = certs.clone();
-			tokio::spawn(async move {
-				let tls_config = config.tls.clone();
-
-				match signal(SignalKind::user_defined1()) {
-					Ok(mut signal) => loop {
-						if signal.recv().await.is_some() {
-							tracing::info!("reloading server certificates");
-
-							if let Err(err) = certs.load_certs(&tls_config) {
-								tracing::warn!(%err, "failed to reload server certificates");
-							}
-						}
-					},
-					Err(err) => tracing::warn!(%err, "failed to setup server certificate reloading"),
-				}
-			});
-		}
+		tokio::spawn(Self::reload_certs(certs.clone(), config.tls.clone()));
 
 		let mut tls = rustls::ServerConfig::builder_with_provider(provider)
 			.with_protocol_versions(&[&rustls::version::TLS13])?
@@ -159,6 +139,22 @@ impl Server {
 			accept: Default::default(),
 			certs,
 		})
+	}
+
+	#[cfg(unix)]
+	async fn reload_certs(certs: Arc<ServeCerts>, tls_config: ServerTlsConfig) {
+		use tokio::signal::unix::{signal, SignalKind};
+
+		// Dunno why we wouldn't be allowed to listen for signals, but just in case.
+		let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+
+		while listener.recv().await.is_some() {
+			tracing::info!("reloading server certificates");
+
+			if let Err(err) = certs.load_certs(&tls_config) {
+				tracing::warn!(%err, "failed to reload server certificates");
+			}
+		}
 	}
 
 	// Return the SHA256 fingerprints of all our certificates.

@@ -24,8 +24,6 @@ use clap::Parser;
 use moq_lite::{OriginConsumer, OriginProducer};
 use serde::{Deserialize, Serialize};
 use std::future::Future;
-#[cfg(unix)]
-use tokio::signal::unix::{signal, SignalKind};
 use tower_http::cors::{Any, CorsLayer};
 
 use crate::{Auth, Cluster};
@@ -121,7 +119,7 @@ impl Web {
 			let config = hyper_serve::tls_rustls::RustlsConfig::from_pem_file(cert.clone(), key.clone()).await?;
 
 			#[cfg(unix)]
-			setup_reload(config.clone(), cert, key);
+			tokio::spawn(reload_certs(config.clone(), cert, key));
 
 			let server = hyper_serve::bind_rustls(listen, config);
 			Some(server.serve(app))
@@ -140,21 +138,19 @@ impl Web {
 }
 
 #[cfg(unix)]
-fn setup_reload(config: hyper_serve::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
-	tokio::spawn(async move {
-		match signal(SignalKind::user_defined1()) {
-			Ok(mut signal) => loop {
-				if signal.recv().await.is_some() {
-					tracing::info!("reloading web certificate");
+async fn reload_certs(config: hyper_serve::tls_rustls::RustlsConfig, cert: PathBuf, key: PathBuf) {
+	use tokio::signal::unix::{signal, SignalKind};
 
-					if let Err(err) = config.reload_from_pem_file(cert.clone(), key.clone()).await {
-						tracing::warn!(%err, "failed to reload web certificate");
-					}
-				}
-			},
-			Err(err) => tracing::warn!(%err, "failed to setup web certificate reloading"),
+	// Dunno why we wouldn't be allowed to listen for signals, but just in case.
+	let mut listener = signal(SignalKind::user_defined1()).expect("failed to listen for signals");
+
+	while listener.recv().await.is_some() {
+		tracing::info!("reloading web certificate");
+
+		if let Err(err) = config.reload_from_pem_file(cert.clone(), key.clone()).await {
+			tracing::warn!(%err, "failed to reload web certificate");
 		}
-	});
+	}
 }
 
 async fn serve_fingerprint(State(state): State<Arc<WebState>>) -> String {
